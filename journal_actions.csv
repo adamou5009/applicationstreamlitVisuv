@@ -1,0 +1,8 @@
+date,utilisateur,action,decodeur
+2025-07-25 14:00:00,admin,recherche,2525
+2025-07-25 14:05:00,admin,recherche non aboutie,2525
+2025-07-25 14:10:00,admin,reactivation,2525
+2025-07-25 14:20:00,admin,reinitialisation code parental,2525
+2025-07-25 14:30:00,admin,suivi abonne,2525
+2025-07-25 14:40:00,utilisateur,recherche,2525
+2025-07-25 14:50:00,utilisateur,suivi abonne,2525
