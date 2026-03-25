@@ -1,249 +1,1052 @@
-# file_attente_json.py
-
+import mysql.connector
 import json
 import os
 import time
+import threading
+import logging
 from datetime import datetime
-from contextlib import contextmanager
-from fonction import connexion_cgaweb, deconnexion_cgaweb, rechercher_par_numero
-import shutil   
-# ==========================
-# 📂 Chemins vers fichiers JSON
-# ==========================
-FICHIER_FILE = "file_attente.json"   # utilisé par le worker
-FICHIER_NOUVELLES = "file_nouvelles.json"  # utilisé par les utilisateurs
-FICHIER_HISTO = "historique.json"
-
-# ==========================
-# 🔒 Gestion du verrou fichier avec timeout
-# ==========================
-@contextmanager
-def verrou_fichier(nom_fichier, timeout=5):
-    """Empêche l'accès concurrent au fichier JSON avec timeout en secondes"""
-    lockfile = nom_fichier + ".lock"
-    start_time = time.time()
-    while os.path.exists(lockfile):
-        if time.time() - start_time > timeout:
-            raise TimeoutError(f"⏳ Timeout verrou pour {nom_fichier}")
-        time.sleep(0.05)
-    try:
-        open(lockfile, "w").close()
-        yield
-    finally:
-        if os.path.exists(lockfile):
-            os.remove(lockfile)
-
-# ==========================
-# 📂 Fonctions lecture/écriture génériques
-# ==========================
-def charger_file(path):
-    """Charge un fichier JSON, crée une liste vide si inexistant"""
-    if not os.path.exists(path):
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump([], f, indent=4)
-        return []
-
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except json.JSONDecodeError:
-        # Renommer le fichier corrompu
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        backup_path = f"{path}.backup_{timestamp}"
-        shutil.move(path, backup_path)
-        logging.warning(f"⚠️ JSON invalide dans {path}, fichier sauvegardé en {backup_path}. Création d'une liste vide.")
-        return []
-
-def sauvegarder_file(path, data):
-    """Sauvegarde sécurisée"""
-    try:
-        with verrou_fichier(path):
-            tmp_file = path + ".tmp"
-            with open(tmp_file, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=4, ensure_ascii=False)
-            os.replace(tmp_file, path)
-            logging.info(f"✅ Sauvegarde réussie dans {path}")
-    except TimeoutError as e:
-        logging.error(f"❌ {e}")
-    except Exception as e:
-        logging.error(f"❌ Erreur inattendue lors de la sauvegarde de {path} :", e)
-
-# ==========================
-# 📌 Ajout d'une requête (utilisateurs)
-# ==========================
-def ajouter_requete(utilisateur, type_recherche, valeur):
-    """
-    Les utilisateurs ajoutent ICI → écrit dans file_nouvelles.json
-    """
-    try:
-        nouvelles = charger_file(FICHIER_NOUVELLES)
-        nouvelle_requete = {
-            "id": int(time.time() * 1000),  # ID unique basé sur timestamp
-            "utilisateur": utilisateur,
-            "type": type_recherche,
-            "valeur": valeur,
-            "statut": "en_attente",
-            "date_creation": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "resultat": None
-        }
-        nouvelles.append(nouvelle_requete)
-        with open(FICHIER_NOUVELLES, "w", encoding="utf-8") as f:
-            json.dump(nouvelles, f, indent=4, ensure_ascii=False)
-        print(f"📌 Nouvelle requête ajoutée dans {FICHIER_NOUVELLES} : {valeur}")
-        return nouvelle_requete
-    except Exception as e:
-        print("❌ Erreur lors de l'ajout de la requête :", e)
-        return None
-
-# ==========================
-# 🔄 Fusion des nouvelles requêtes
-# ==========================
-def fusionner_nouvelles():
-    """Déplace les requêtes de file_nouvelles.json vers file_attente.json"""
-    nouvelles = charger_file(FICHIER_NOUVELLES)
-    if not nouvelles:
-        return
-
-    file_attente = charger_file(FICHIER_FILE)
-    file_attente.extend(nouvelles)
-
-    # Facultatif : supprimer doublons sur la clé "id"
-    file_unique = {req["id"]: req for req in file_attente}.values()
-
-    sauvegarder_file(FICHIER_FILE, list(file_unique))
-    sauvegarder_file(FICHIER_NOUVELLES, [])  # vider après fusion
-
-    logging.info(f"🔄 Fusion de {len(nouvelles)} requêtes dans la file principale")
-# 📂 Compatibilité API
-# ==========================
-def lire_file():
-    """Lecture de la file principale (compatibilité ancienne API)"""
-    return charger_file(FICHIER_FILE)
-
-def lire_nouvelles():
-    """Lecture de la file des nouvelles requêtes"""
-    return charger_file(FICHIER_NOUVELLES)
-
-
-# ==========================
-# 📌 Mettre à jour une requête
-# ==========================
-def mettre_a_jour_requete(req_id, statut=None, resultat=None):
-    file_attente = charger_file(FICHIER_FILE)
-    for req in file_attente:
-        if req["id"] == req_id:
-            if statut:
-                req["statut"] = statut
-            if resultat is not None:
-                req["resultat"] = resultat
-            break
-    sauvegarder_file(FICHIER_FILE, file_attente)
-
-# ==========================
-# 📜 Historique
-# ==========================
-def lire_historique():
-    return charger_file(FICHIER_HISTO)
-
-def ajouter_historique(requete):
-    histo = lire_historique()
-    histo.append(requete)
-    sauvegarder_file(FICHIER_HISTO, histo)
-
-# ==========================
-# ⚙️ Traitement automatique
-# ==========================
+import streamlit as st
 from selenium.webdriver.remote.webelement import WebElement
 
+from fonction import connexion_cgaweb, deconnexion_cgaweb, rechercher_par_numero, get_connection, WebDriverManager, action_abonne
+
+# =========================================================
+# ⚙️ 1. CONFIGURATION & ÉTAT GLOBAL
+# =========================================================
+DB_CONFIG = {
+    "host":     "localhost",
+    "user":     "root",
+    "password": "",
+    "database": "visuv_cga_db"
+}
+
+SEUIL_DOUBLE_WORKER    = 150
+WORKER_LOCK_FILE       = "worker_{}.lock"
+MAX_SESSIONS_CGAWEB    = 2    # limite stricte du serveur CGA
+MAX_ECHECS_CONSECUTIFS = 5    # arrêt du worker après N échecs "max sessions"
+BACKOFF_MAX_SESSIONS   = 300  # secondes d'attente si serveur saturé (5 min)
+SESSION_TIMEOUT_MINUTES = 60
+
+_worker_lock          = threading.Lock()
+_workers              = {}    # { worker_id: threading.Thread }
+_echecs_consecutifs   = {}    # { worker_id: int }
+_started              = False  # FIX #3 — garde-fou contre les lancements multiples Streamlit
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+
+# =========================================================
+# 🗄️ 2. GESTION DE LA BASE DE DONNÉES (SQL)
+# =========================================================
+def get_db_connection():
+    return mysql.connector.connect(**DB_CONFIG)
+
+
+def ajouter_log_sql(req_id, message):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            "INSERT INTO requete_logs (requete_id, message) VALUES (%s, %s)",
+            (req_id, message)
+        )
+        conn.commit()
+    except Exception as e:
+        logging.error(f"Erreur log SQL : {e}")
+    finally:
+        cursor.close()  # FIX #5 — fermeture garantie
+        conn.close()
+
+
+def mettre_a_jour_requete(req_id, statut=None, resultat=None, logs=None, worker_id=None):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        updates, params = [], []
+        if statut:
+            updates.append("statut = %s")
+            params.append(statut)
+        if resultat is not None:
+            # FIX #1 — sérialisation JSON côté Python (pas de JSON_OBJECT MySQL)
+            updates.append("resultat = %s")
+            params.append(json.dumps(resultat, ensure_ascii=False))
+        if worker_id is not None:  # FIX #2 — guard correct pour worker_id = 0
+            updates.append("worker_id = %s")
+            params.append(worker_id)
+
+        if updates:
+            sql = f"UPDATE requetes SET {', '.join(updates)} WHERE id = %s"
+            params.append(req_id)
+            cursor.execute(sql, tuple(params))
+
+        if logs:
+            for log in logs:
+                cursor.execute(
+                    "INSERT INTO requete_logs (requete_id, message) VALUES (%s, %s)",
+                    (req_id, log)
+                )
+        conn.commit()
+        return True
+    except Exception as e:
+        logging.error(f"❌ Erreur SQL update (Req {req_id}) : {e}")
+        return False
+    finally:
+        cursor.close()  # FIX #5
+        conn.close()
+
+
+def ajouter_requete(utilisateur, type_recherche, valeur):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        req_id = int(time.time() * 1000)
+        cursor.execute(
+            """INSERT INTO requetes (id, utilisateur, type_recherche, valeur, statut)
+               VALUES (%s, %s, %s, %s, 'en_attente')""",
+            (req_id, utilisateur, type_recherche, valeur)
+        )
+        conn.commit()
+        return {"id": req_id, "statut": "en_attente"}
+    except Exception as e:
+        logging.error(f"❌ Erreur SQL ajout : {e}")
+        return None
+    finally:
+        cursor.close()  # FIX #5
+        conn.close()
+
+
+def lire_requete_par_id(req_id):
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute("SELECT * FROM requetes WHERE id = %s", (req_id,))
+        res = cursor.fetchone()
+        if res and res.get('resultat'):
+            try:
+                res['resultat'] = json.loads(res['resultat'])
+            except Exception:
+                pass
+        return res
+    finally:
+        cursor.close()  # FIX #5
+        conn.close()
+
+
+# =========================================================
+# 🔑 3. UTILITAIRES & LECTURE
+# =========================================================
+def charger_compte_actif():
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute("SELECT * FROM comptes_cgaweb WHERE est_actif = TRUE LIMIT 1")
+        compte = cursor.fetchone()
+        if compte:
+            url = "https://cgaweb-afrique.canal-plus.com/cgaweb/servlet/Home"
+            return (url, compte['user_cga'], compte['password_cga'], compte['secret_otp'])
+        return None
+    finally:
+        cursor.close()  # FIX #5
+        conn.close()
+
+
 def nettoyer_resultat(res):
-    """
-    Convertit tous les WebElement en texte ou en structure JSON-friendly
-    """
-    if isinstance(res, WebElement):
-        return res.text  # ou res.get_attribute("value") selon ce que tu veux
-    elif isinstance(res, list):
-        return [nettoyer_resultat(r) for r in res]
-    elif isinstance(res, dict):
-        return {k: nettoyer_resultat(v) for k, v in res.items()}
-    else:
-        return res  # str, int, float, None, etc.# adapte selon ton projet
-import logging
-# --- Configuration du logger ---
-logging.basicConfig(
-    filename="Fichierlogging_cgaweb_worker.log",
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S"
-)
-logger = logging.getLogger("CGAWEB_Worker")
+    if isinstance(res, WebElement): return res.text
+    if isinstance(res, list):       return [nettoyer_resultat(r) for r in res]
+    if isinstance(res, dict):       return {k: nettoyer_resultat(v) for k, v in res.items()}
+    return res
 
-def traiter_file_automatique(url, utilisateur, mot_de_passe, pause=0.2, retry_pause=5):
-    """Worker : traite les requêtes depuis la file avec un driver isolé"""
-    driver = None
-    original_window = new_window = None
 
+def compter_requetes_en_attente():
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT COUNT(*) FROM requetes WHERE statut = 'en_attente'")
+        return cursor.fetchone()[0]
+    except Exception:
+        return 0
+    finally:
+        cursor.close()  # FIX #5
+        conn.close()
+
+
+def lire_file():
+    """Retourne les requêtes en_attente et en_cours (pour le tableau de bord)."""
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute(
+            "SELECT * FROM requetes WHERE statut IN ('en_attente', 'en_cours') ORDER BY id DESC"
+        )
+        return cursor.fetchall()
+    finally:
+        cursor.close()  # FIX #5
+        conn.close()
+
+
+def lire_historique():
+    """Retourne les 50 dernières requêtes terminées/échouées/abandonnées."""
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute(
+            """SELECT * FROM requetes
+               WHERE statut IN ('terminee', 'echouee', 'abandonné')
+               ORDER BY id DESC LIMIT 50"""
+        )
+        return cursor.fetchall()
+    finally:
+        cursor.close()  # FIX #5
+        conn.close()
+
+
+# =========================================================
+# 🛡️ 4. GESTION DES VERROUS (LOCKS)
+# =========================================================
+def nettoyer_vieux_verrous():
+    for i in range(1, 3):
+        lock_file = WORKER_LOCK_FILE.format(i)
+        if os.path.exists(lock_file):
+            try:
+                os.remove(lock_file)
+                logging.info(f"🧹 Vieux verrou {lock_file} supprimé.")
+            except Exception:
+                pass
+
+
+def est_worker_actif(worker_id):
+    lock_file = WORKER_LOCK_FILE.format(worker_id)
+    if os.path.exists(lock_file):
+        try:
+            with open(lock_file, "r") as f:
+                pid = int(f.read().strip())
+            os.kill(pid, 0)
+            return True
+        except Exception:
+            if os.path.exists(lock_file):
+                os.remove(lock_file)
+    return False
+
+
+def creer_verrou_worker(worker_id):
+    try:
+        with open(WORKER_LOCK_FILE.format(worker_id), "w") as f:
+            f.write(str(os.getpid()))
+        return True
+    except Exception:
+        return False
+
+
+def supprimer_verrou_worker(worker_id):
+    lock_file = WORKER_LOCK_FILE.format(worker_id)
+    if os.path.exists(lock_file):
+        try:
+            os.remove(lock_file)
+        except Exception:
+            pass
+
+
+# =========================================================
+# 👤 5. HELPERS SESSION UTILISATEUR
+# =========================================================
+def utilisateur_est_connecte(user):
+    """Vérifie en base si l'utilisateur a une session active."""
+    try:
+        conn   = get_db_connection()
+        cursor = conn.cursor(dictionary=True)
+        try:
+            cursor.execute(
+                "SELECT 1 FROM sessions_actives WHERE utilisateur = %s AND active = 1",
+                (user,)
+            )
+            row = cursor.fetchone()
+            return row is not None
+        finally:
+            cursor.close()  # FIX #5
+            conn.close()
+    except Exception as e:
+        logging.error(f"❌ Erreur vérif session '{user}' : {e}")
+        return False  # FIX #8 — False au lieu de True pour éviter les faux positifs
+
+
+def verifier_et_abandonner(worker_id, req_id, utilisateur):
+    if not utilisateur_est_connecte(utilisateur):
+        logging.warning(f"⚠️ W{worker_id} — '{utilisateur}' déconnecté. Req {req_id} → abandonné.")
+        mettre_a_jour_requete(
+            req_id,
+            statut="abandonné",
+            resultat={"erreur": "Requête abandonnée : utilisateur déconnecté ou page changée."},
+            logs=[f"⚠️ Abandon — session inactive pour '{utilisateur}'"]
+        )
+        return True
+    return False
+
+
+# =========================================================
+# ⏱️ 6. NETTOYAGE SESSIONS EXPIRÉES
+# =========================================================
+def nettoyer_sessions_expirées(timeout_minutes: int = SESSION_TIMEOUT_MINUTES):
+    """Expire les sessions inactives depuis plus de timeout_minutes minutes."""
+    conn   = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            """SELECT utilisateur FROM sessions_actives
+               WHERE active = 1
+               AND updated_at < NOW() - INTERVAL %s MINUTE""",
+            (timeout_minutes,)
+        )
+        expires = [row[0] for row in cursor.fetchall()]
+ 
+        if expires:
+            cursor.execute(
+                """UPDATE sessions_actives
+                   SET active = 0, token = NULL, updated_at = NOW()
+                   WHERE active = 1
+                   AND updated_at < NOW() - INTERVAL %s MINUTE""",
+                (timeout_minutes,)
+            )
+            conn.commit()
+ 
+            erreur_json = json.dumps(
+                {"erreur": "Session expirée (arrêt brutal détecté)."},
+                ensure_ascii=False
+            )
+            for user in expires:
+                cursor.execute(
+                    """UPDATE requetes
+                       SET statut   = 'abandonné',
+                           resultat = %s
+                       WHERE utilisateur = %s
+                       AND   statut IN ('en_attente', 'en_cours')""",
+                    (erreur_json, user)
+                )
+                logging.info(f"🧹 Session expirée nettoyée : '{user}'")
+            conn.commit()
+ 
+    except Exception as e:
+        logging.error(f"❌ Erreur nettoyage sessions expirées : {e}")
+    finally:
+        cursor.close()
+        conn.close()
+
+
+def reset_saturation_cgaweb():
+    """
+    Débloque CGAWEB après saturation.
+    Retourne False proprement si la table n'existe pas.
+    """
+    conn   = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            """UPDATE cgaweb_statut
+               SET bloque = 0,
+                   raison = NULL,
+                   bloque_at = NULL
+               WHERE id = 1"""
+        )
+        conn.commit()
+        logging.info("✅ CGAWEB débloqué via reset_saturation_cgaweb()")
+        return True
+    except Exception as e:
+        msg = str(e)
+        if "doesn't exist" in msg or "1146" in msg:
+            logging.warning("⚠️ Table cgaweb_statut absente — déblocage ignoré.")
+        else:
+            logging.error(f"❌ Erreur reset CGAWEB : {e}")
+        return False
+    finally:
+        cursor.close()
+        conn.close()
+
+
+def _est_cgaweb_bloque():
+    """
+    Vérifie si CGAWEB est marqué comme bloqué en base.
+    Retourne False sans erreur si la table cgaweb_statut n'existe pas encore.
+    """
+    conn   = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute("SELECT bloque FROM cgaweb_statut WHERE id = 1")
+        row = cursor.fetchone()
+        return row is not None and row["bloque"] == 1
+    except Exception as e:
+        msg = str(e)
+        # Table absente → log warning (pas ERROR) et on continue normalement
+        if "doesn't exist" in msg or "1146" in msg:
+            logging.warning(
+                "⚠️ Table cgaweb_statut absente — "
+                "exécutez create_cgaweb_statut.sql pour la créer. "
+                "CGAWEB considéré non bloqué."
+            )
+        else:
+            logging.error(f"❌ Erreur statut CGAWEB : {e}")
+        return False   # fail-safe : on ne bloque pas le système
+    finally:
+        cursor.close()
+        conn.close()
+
+
+# =========================================================
+# 🔐 7. GESTION DES SESSIONS CGAWEB (anti-saturation)
+# =========================================================
+def _compter_sessions_cgaweb_actives():
+    conn   = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT COUNT(*) FROM cgaweb_sessions WHERE connecte = 1")
+        return cursor.fetchone()[0]
+    except Exception as e:
+        logging.error(f"❌ Erreur lecture cgaweb_sessions : {e}")
+        return 0  # FIX #6 — 0 au lieu de MAX_SESSIONS_CGAWEB pour éviter un blocage global
+    finally:
+        cursor.close()  # FIX #5
+        conn.close()
+
+
+def _marquer_session_cgaweb(worker_id, connecte: bool):
+    conn   = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            """INSERT INTO cgaweb_sessions (worker_id, connecte)
+               VALUES (%s, %s)
+               ON DUPLICATE KEY UPDATE connecte = %s, updated_at = NOW()""",
+            (worker_id, int(connecte), int(connecte))
+        )
+        conn.commit()
+        logging.info(f"🔑 W{worker_id} — Session CGAWEB marquée : connecte={connecte}")  # FIX #9
+    except Exception as e:
+        logging.error(f"❌ Erreur update cgaweb_sessions W{worker_id} : {e}")
+    finally:
+        cursor.close()  # FIX #5
+        conn.close()
+
+
+def _attendre_slot_cgaweb(worker_id, timeout=120, intervalle=3):
+    debut = time.time()
     while True:
-        # Fusion des nouvelles requêtes
-        fusionner_nouvelles()
-        file_attente = charger_file(FICHIER_FILE)
-        requetes_en_attente = [req for req in file_attente if req["statut"] == "en_attente"]
+        try:
+            actives = _compter_sessions_cgaweb_actives()
 
-        if not requetes_en_attente:
-            logging.info("✅ La file est vide, aucune connexion nécessaire.")
-            if driver:
-                try:
-                    deconnexion_cgaweb(driver)
-                    driver.quit()
-                    logging.info("🔌 Déconnexion CGAWEB terminée.")
-                except:
-                    pass
-            return
-
-        # Connexion si pas déjà connecté
-        if not driver:
+            conn   = get_db_connection()
+            cursor = conn.cursor()
             try:
-                logging.info("🔄 Tentative de connexion à CGAWEB...")
-                driver, original_window, new_window = connexion_cgaweb(url, utilisateur, mot_de_passe, headless=True)
-                logging.info("✅ Connexion établie.")
-            except Exception as e:
-                logging.error(f"❌ Connexion échouée : {e}. Nouvelle tentative dans {retry_pause}s...")
-                time.sleep(retry_pause)
-                continue  # réessaie sans marquer les requêtes en erreur
+                cursor.execute(
+                    "SELECT connecte FROM cgaweb_sessions WHERE worker_id = %s", (worker_id,)
+                )
+                row = cursor.fetchone()
+            finally:
+                cursor.close()  # FIX #5
+                conn.close()
 
-        # Traiter chaque requête
-        for req in requetes_en_attente:
-            req_id = req["id"]
-            mettre_a_jour_requete(req_id, statut="en_cours")
+            deja_compte  = (row is not None and row[0] == 1)
+            slots_libres = MAX_SESSIONS_CGAWEB - actives + (1 if deja_compte else 0)
+
+            if slots_libres > 0:
+                logging.info(f"✅ W{worker_id} — Slot CGAWEB disponible ({actives} session(s) active(s))")
+                return True
+
+        except Exception as e:
+            logging.error(f"❌ W{worker_id} — Erreur vérif slots CGAWEB : {e}")
+            # FIX #6 — en cas d'erreur DB on autorise le slot (retourne True)
+            return True
+
+        elapsed = time.time() - debut
+        if elapsed >= timeout:
+            logging.error(
+                f"❌ W{worker_id} — Timeout {timeout}s : aucun slot CGAWEB libre "
+                f"({actives}/{MAX_SESSIONS_CGAWEB} sessions actives)"
+            )
+            return False
+
+        logging.info(
+            f"⏳ W{worker_id} — {actives}/{MAX_SESSIONS_CGAWEB} sessions CGAWEB occupées. "
+            f"Attente slot... ({int(elapsed)}s écoulées)"
+        )
+        time.sleep(intervalle)
+
+
+# =========================================================
+# 🚀 8. CORE WORKER (TRAITEMENT)
+# =========================================================
+
+def _deconnecter_proprement(driver, manager, worker_id):
+    """
+    Déconnexion CGAWEB + fermeture navigateur + libération du slot session.
+    Ordre strict : slot libéré EN DERNIER (après fermeture browser confirmée).
+    Ne lève jamais d'exception.
+    """
+    if driver:
+        try:
+            logging.info(f"🔌 W{worker_id} — Déconnexion CGAWEB...")
+            deconnexion_cgaweb(driver)
+            logging.info(f"✅ W{worker_id} — Déconnexion CGAWEB OK")
+        except Exception as e:
+            logging.warning(f"⚠️ W{worker_id} — Erreur déconnexion CGAWEB (on continue) : {e}")
+
+    try:
+        manager.stop_driver()
+        logging.info(f"🛑 W{worker_id} — WebDriver arrêté")  # FIX #9
+    except Exception as e:
+        logging.warning(f"⚠️ W{worker_id} — Erreur stop_driver (on continue) : {e}")
+
+    # FIX #7 — libération explicite du slot CGAWEB en dernier, après fermeture browser
+    _marquer_session_cgaweb(worker_id, False)
+    logging.info(f"🔓 W{worker_id} — Slot session CGAWEB libéré")
+
+
+def traiter_file_automatique(worker_id, pause=0.2, retry_pause=5, check_interval=5):
+    """
+    Worker Thread — un WebDriverManager privé par worker, jamais partagé.
+    """
+    import base64
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    from selenium.webdriver.common.by import By
+
+    logging.info(f"🚀 Démarrage Worker {worker_id}")  # FIX #9
+
+    manager = WebDriverManager()
+    driver  = None
+    ow, nw  = None, None
+
+    # ----------------------------------------------------------
+    def _connecter_cgaweb(req_id_echec=None):
+        """
+        Connexion CGAWEB sécurisée avec détection de saturation serveur.
+        """
+        compte_info = charger_compte_actif()
+        if not compte_info:
+            logging.error(f"❌ W{worker_id} — Aucun compte CGAWEB actif.")
+            if req_id_echec is not None:  # FIX #2
+                mettre_a_jour_requete(
+                    req_id_echec,
+                    statut="echouee",
+                    resultat={"erreur": "Aucun compte CGAWEB actif."}
+                )
+            return None, None, None
+
+        url, user, pwd, secret = compte_info
+
+        if not _attendre_slot_cgaweb(worker_id):
+            logging.error(f"❌ W{worker_id} — Aucun slot CGAWEB disponible (timeout).")
+            if req_id_echec is not None:  # FIX #2
+                mettre_a_jour_requete(
+                    req_id_echec,
+                    statut="echouee",
+                    resultat={"erreur": "Aucun slot session CGAWEB disponible (timeout)."}
+                )
+            return None, None, None
+
+        for tentative in range(1, 3):
+            logging.info(f"🔐 W{worker_id} — Démarrage WebDriver (tentative {tentative}/2)...")  # FIX #9
             try:
-                res = rechercher_par_numero(driver, req["valeur"], original_window, new_window)
+                result = connexion_cgaweb(manager, url, user, pwd, secret, headless=True)
 
-                if res is None:
-                    mettre_a_jour_requete(req_id, statut="erreur", resultat="Aucun résultat trouvé")
-                else:
-                    # Nettoyage : transforme WebElements en texte, tuples si nécessaire
-                    if isinstance(res, tuple):
-                        numero_abonne, fiche_abonne = res
-                        fiche_text = nettoyer_resultat(fiche_abonne)  # texte uniquement
-                        res_json = (numero_abonne, fiche_text)
-                    else:
-                        res_json = nettoyer_resultat(res)
+                # ── Cas 1 : serveur saturé ──
+                if (
+                    isinstance(result, tuple)
+                    and len(result) == 3
+                    and result[0] == "MAX_SESSIONS"
+                ):
+                    logging.warning(
+                        f"⚠️ W{worker_id} — Serveur CGAWEB saturé. "
+                        f"Attente {BACKOFF_MAX_SESSIONS}s..."
+                    )
+                    try:
+                        manager.stop_driver()
+                    except Exception:
+                        pass
 
-                    mettre_a_jour_requete(req_id, statut="terminee", resultat=res_json)
+                    # FIX #7 — libérer explicitement le slot avant d'attendre
+                    _marquer_session_cgaweb(worker_id, False)
 
-            except Exception as e:
-                logging.error(f"⚠️ Erreur pendant la recherche pour {req['valeur']}: {e}")
-                mettre_a_jour_requete(req_id, statut="en_attente")  # réessaie plus tard
+                    _echecs_consecutifs[worker_id] = _echecs_consecutifs.get(worker_id, 0) + 1
+                    nb_echecs = _echecs_consecutifs[worker_id]
+                    logging.warning(
+                        f"⚠️ W{worker_id} — Échecs consécutifs : "
+                        f"{nb_echecs}/{MAX_ECHECS_CONSECUTIFS}"
+                    )
 
-            # Archiver sans inclure le driver ni WebElements
-            file_actuelle = charger_file(FICHIER_FILE)
-            for r in file_actuelle:
-                if r["id"] == req_id:
-                    ajouter_historique(r)
+                    if nb_echecs >= MAX_ECHECS_CONSECUTIFS:
+                        logging.error(
+                            f"❌ W{worker_id} — {MAX_ECHECS_CONSECUTIFS} échecs consécutifs. "
+                            f"Arrêt du worker pour éviter la boucle infinie."  # FIX #9
+                        )
+                        if req_id_echec is not None:  # FIX #2
+                            mettre_a_jour_requete(
+                                req_id_echec,
+                                statut="echouee",
+                                resultat={"erreur": "Serveur CGAWEB saturé — trop d'échecs consécutifs."}
+                            )
+                        return None, None, None
+
+                    time.sleep(BACKOFF_MAX_SESSIONS)
                     break
+
+                # ── Cas 2 : échec générique ──
+                if result is None or result[0] is None:
+                    raise Exception("connexion_cgaweb a retourné None")
+
+                # ── Cas 3 : succès ──
+                d, o, n = result
+                _marquer_session_cgaweb(worker_id, True)
+                _echecs_consecutifs[worker_id] = 0
+                logging.info(f"✅ W{worker_id} — Connexion CGAWEB OK (tentative {tentative})")
+                return d, o, n
+
+            except Exception as e:
+                logging.warning(f"⚠️ W{worker_id} — Tentative {tentative}/2 échouée : {e}")
+                try:
+                    manager.stop_driver()
+                except Exception:
+                    pass
+                if tentative < 2:
+                    time.sleep(retry_pause)
+
+        logging.error(f"❌ W{worker_id} — Connexion CGAWEB impossible après 2 tentatives.")
+        if req_id_echec is not None:  # FIX #2
+            mettre_a_jour_requete(
+                req_id_echec,
+                statut="echouee",
+                resultat={"erreur": "Connexion CGAWEB impossible après 2 tentatives."}
+            )
+        return None, None, None
+
+    # ----------------------------------------------------------
+    def _prendre_screenshot_page(driver_inst, worker_id_log):
+        """
+        Capture uniquement le contenu de la page (viewport) via CDP.
+        Retourne la chaîne base64 de l'image PNG, ou None en cas d'échec.
+        """
+        try:
+            result = driver_inst.execute_cdp_cmd(
+                "Page.captureScreenshot",
+                {
+                    "format":               "png",
+                    "fromSurface":          False,
+                    "captureBeyondViewport": False
+                }
+            )
+            encoded = result.get("data", "")
+            if len(encoded) < 5000:
+                logging.warning(f"⚠️ W{worker_id_log} — Screenshot CDP trop petit, ignoré.")
+                return None
+            logging.info(f"📸 W{worker_id_log} — Screenshot CDP OK ({len(encoded)} chars)")
+            return encoded
+        except Exception as e:
+            logging.warning(f"⚠️ W{worker_id_log} — Erreur CDP screenshot, fallback PNG : {e}")
+            try:
+                image_bytes = driver_inst.get_screenshot_as_png()
+                encoded = base64.b64encode(image_bytes).decode('utf-8')
+                if len(encoded) < 5000:
+                    logging.warning(f"⚠️ W{worker_id_log} — Fallback screenshot trop petit, ignoré.")
+                    return None
+                logging.info(f"📸 W{worker_id_log} — Fallback screenshot OK ({len(encoded)} chars)")
+                return encoded
+            except Exception as e2:
+                logging.warning(f"⚠️ W{worker_id_log} — Erreur fallback screenshot : {e2}")
+                return None
+
+    # =========================================================
+    # ── CONNEXION INITIALE ───────────────────────────────────
+    # =========================================================
+    driver, ow, nw = _connecter_cgaweb()
+    if driver is None:
+        logging.error(f"❌ W{worker_id} — Connexion initiale échouée. Arrêt du worker.")  # FIX #9
+        supprimer_verrou_worker(worker_id)
+        return
+
+    # =========================================================
+    # ── BOUCLE PRINCIPALE ────────────────────────────────────
+    # =========================================================
+    try:
+        while True:
+            req, req_id = None, None
+
+            # ── 1. RÉCUPÉRATION DE LA TÂCHE ──────────────────
+            try:
+                conn   = get_db_connection()
+                cursor = conn.cursor(dictionary=True)
+                try:
+                    query = "SELECT * FROM requetes WHERE statut = 'en_attente' "
+                    if worker_id == 2:
+                        query += "AND (id % 2) = 1 "
+                    query += "ORDER BY id ASC LIMIT 1"
+                    cursor.execute(query)
+                    candidate = cursor.fetchone()
+                    if candidate:
+                        cursor.execute(
+                            "UPDATE requetes SET statut = 'en_cours', worker_id = %s "
+                            "WHERE id = %s AND statut = 'en_attente'",
+                            (worker_id, candidate['id'])
+                        )
+                        conn.commit()
+                        if cursor.rowcount > 0:
+                            req    = candidate
+                            req_id = req["id"]
+                finally:
+                    cursor.close()  # FIX #5
+                    conn.close()
+            except Exception as e:
+                logging.error(f"❌ W{worker_id} — Erreur SQL fetch : {e}")
+                time.sleep(5)
+                continue
+
+            # ── 2. FILE VIDE → DÉCONNEXION PROPRE ET ARRÊT ───
+            if not req:
+                nb = compter_requetes_en_attente()
+                if nb == 0 or (worker_id == 2 and nb < SEUIL_DOUBLE_WORKER):
+                    logging.info(f"💤 W{worker_id} — File vide. Déconnexion + arrêt.")
+                    break
+                time.sleep(check_interval)
+                continue
+
+            utilisateur = req.get("utilisateur")
+
+            # ── 3. VÉRIFICATION SESSION UTILISATEUR ──────────
+            if verifier_et_abandonner(worker_id, req_id, utilisateur):
+                time.sleep(pause)
+                continue
+
+            # ── 4. SANTÉ DU BROWSER ──────────────────────────
+            browser_ok = True
+            try:
+                driver.current_window_handle
+            except Exception:
+                browser_ok = False
+
+            if not browser_ok:
+                logging.warning(f"⚠️ W{worker_id} — Browser perdu (hors traitement). Reconnexion...")
+                _deconnecter_proprement(driver, manager, worker_id)
+                driver = ow = nw = None
+
+                new_driver, new_ow, new_nw = _connecter_cgaweb(req_id_echec=req_id)
+                if new_driver is None:
+                    break
+                driver, ow, nw = new_driver, new_ow, new_nw
+
+            # ── 5. ROUTAGE & EXÉCUTION ────────────────────────
+            try:
+                type_req = req.get("type_recherche", "").lower()
+                valeur   = req["valeur"]
+                ajouter_log_sql(req_id, f"W{worker_id} — type: {type_req} | valeur: {valeur}")
+
+                if verifier_et_abandonner(worker_id, req_id, utilisateur):
+                    time.sleep(pause)
+                    continue
+
+                # ── Recherche standard ────────────────────────
+                if type_req in ("numéro d'abonné", "numéro de décodeur", "numéro de téléphone"):
+                    res = rechercher_par_numero(driver, valeur, ow, nw)
+
+                    if verifier_et_abandonner(worker_id, req_id, utilisateur):
+                        time.sleep(pause)
+                        continue
+
+                    if res:
+                        if isinstance(res, tuple):
+                            num_abo, fiche = res
+                            encoded_img    = None
+                            try:
+                                driver.switch_to.window(ow)
+                                driver.switch_to.default_content()
+
+                                wait = WebDriverWait(driver, 15)
+                                wait.until(
+                                    EC.frame_to_be_available_and_switch_to_it((By.NAME, "_right"))
+                                )
+                                wait.until(
+                                    EC.visibility_of_element_located((By.ID, "view-contract"))
+                                )
+                                driver.execute_script("window.scrollTo(0, 0);")
+                                time.sleep(1)
+
+                                encoded_img = _prendre_screenshot_page(driver, worker_id)
+
+                            except Exception as e:
+                                logging.warning(f"⚠️ W{worker_id} — Erreur screenshot : {e}")
+
+                            # FIX #1 — résultat sérialisé en Python, pas via JSON_OBJECT MySQL
+                            final = {
+                                "numero_abonne":     num_abo,
+                                "screenshot_base64": encoded_img,
+                                "type":              req["type_recherche"],
+                                "date_extraction":   datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            }
+                        else:
+                            final = nettoyer_resultat(res)
+
+                        mettre_a_jour_requete(req_id, statut="terminee", resultat=final,
+                                              logs=["✅ Extraction réussie"])
+                    else:
+                        mettre_a_jour_requete(req_id, statut="echouee",
+                                              resultat={"erreur": "Non trouvé sur CGAWEB"})
+
+                # ── Réactivation ──────────────────────────────
+                elif type_req == "réactivation":
+                    res = rechercher_par_numero(driver, valeur, ow, nw)
+                    if verifier_et_abandonner(worker_id, req_id, utilisateur):
+                        time.sleep(pause)
+                        continue
+                    if not res or not isinstance(res, tuple):
+                        mettre_a_jour_requete(req_id, statut="echouee",
+                                              resultat={"erreur": "Abonné introuvable pour réactivation"})
+                    else:
+                        _, fiche = res
+                        ok, msg  = action_abonne(driver, fiche, action="reactivation")
+                        if verifier_et_abandonner(worker_id, req_id, utilisateur):
+                            time.sleep(pause)
+                            continue
+                        if ok:
+                            mettre_a_jour_requete(req_id, statut="terminee",
+                                                  resultat={"message": "Réactivation effectuée avec succès"},
+                                                  logs=["✅ Réactivation OK"])
+                        else:
+                            mettre_a_jour_requete(req_id, statut="echouee",
+                                                  resultat={"erreur": msg or "Échec réactivation"})
+
+                # ── Réinitialisation code parental ────────────
+                elif type_req == "réinitialisation":
+                    res = rechercher_par_numero(driver, valeur, ow, nw)
+                    if verifier_et_abandonner(worker_id, req_id, utilisateur):
+                        time.sleep(pause)
+                        continue
+                    if not res or not isinstance(res, tuple):
+                        mettre_a_jour_requete(req_id, statut="echouee",
+                                              resultat={"erreur": "Abonné introuvable pour réinitialisation"})
+                    else:
+                        _, fiche = res
+                        ok, msg  = action_abonne(driver, fiche, action="reinit")
+                        if verifier_et_abandonner(worker_id, req_id, utilisateur):
+                            time.sleep(pause)
+                            continue
+                        if ok:
+                            mettre_a_jour_requete(req_id, statut="terminee",
+                                                  resultat={"message": "Code parental réinitialisé avec succès"},
+                                                  logs=["✅ Réinitialisation OK"])
+                        else:
+                            mettre_a_jour_requete(req_id, statut="echouee",
+                                                  resultat={"erreur": msg or "Échec réinitialisation"})
+
+                # ── Type inconnu ──────────────────────────────
+                else:
+                    logging.warning(f"⚠️ W{worker_id} — Type de requête inconnu : '{type_req}'")  # FIX #9
+                    mettre_a_jour_requete(req_id, statut="echouee",
+                                          resultat={"erreur": f"Type non géré : {type_req}"})
+
+            except Exception as e:
+                logging.error(f"❌ W{worker_id} — Erreur traitement Req {req_id} : {e}", exc_info=True)
+
+                if "session" in str(e).lower() or "window" in str(e).lower():
+                    logging.warning(
+                        f"🔄 W{worker_id} — Browser perdu sur Req {req_id}. "
+                        f"Remise en attente + reconnexion..."
+                    )
+                    mettre_a_jour_requete(
+                        req_id,
+                        statut="en_attente",
+                        logs=[f"⚠️ W{worker_id} — Browser perdu en cours de traitement, reprise automatique."]
+                    )
+                    # FIX #7 — libérer le slot CGAWEB avant de tenter la reconnexion
+                    _marquer_session_cgaweb(worker_id, False)
+                    try:
+                        manager.stop_driver()
+                        logging.info(f"🛑 W{worker_id} — WebDriver stoppé après crash")  # FIX #9
+                    except Exception:
+                        pass
+                    driver = ow = nw = None
+
+                    logging.info(f"🔐 W{worker_id} — Reconnexion CGAWEB immédiate...")
+                    new_driver, new_ow, new_nw = _connecter_cgaweb()
+
+                    if new_driver is None:
+                        logging.error(
+                            f"❌ W{worker_id} — Reconnexion impossible. "
+                            f"Req {req_id} → echouee. Arrêt du worker."  # FIX #9
+                        )
+                        mettre_a_jour_requete(
+                            req_id,
+                            statut="echouee",
+                            resultat={"erreur": "Browser perdu + reconnexion CGAWEB impossible."},
+                            logs=[f"❌ W{worker_id} — Abandon après échec reconnexion."]
+                        )
+                        break
+
+                    driver, ow, nw = new_driver, new_ow, new_nw
+                    logging.info(f"✅ W{worker_id} — Reconnexion OK. Req {req_id} reprise au prochain tour.")
+
+                else:
+                    mettre_a_jour_requete(
+                        req_id,
+                        statut="echouee",
+                        resultat={"erreur": str(e)}
+                    )
 
             time.sleep(pause)
 
-        logging.info("✅ Cycle de traitement terminé, vérification de la file...")
+    except Exception as e:
+        logging.critical(f"💥 Worker {worker_id} crashé de façon inattendue : {e}", exc_info=True)
+        raise
+
+    finally:
+        logging.info(f"🔒 W{worker_id} — Nettoyage final en cours...")  # FIX #9
+        _deconnecter_proprement(driver, manager, worker_id)
+        supprimer_verrou_worker(worker_id)
+        logging.info(f"🛑 W{worker_id} — Arrêt complet.")  # FIX #9
 
 
+# =========================================================
+# 🏁 9. LANCEMENT & WATCHDOG
+# =========================================================
+def lancer_worker():
+    global _workers
+    with _worker_lock:
+        nb     = compter_requetes_en_attente()
+        besoin = 2 if nb >= SEUIL_DOUBLE_WORKER else 1
+        lances = []
 
+        for wid in range(1, besoin + 1):
+            if wid in _workers and _workers[wid].is_alive():
+                lances.append(wid)
+                continue
+            if est_worker_actif(wid):
+                lances.append(wid)
+                continue
+
+            supprimer_verrou_worker(wid)
+            if creer_verrou_worker(wid):
+                t = threading.Thread(
+                    target=traiter_file_automatique,
+                    args=(wid,),
+                    daemon=True,
+                    name=f"Worker-{wid}"
+                )
+                t.start()
+                _workers[wid] = t
+                lances.append(wid)
+                logging.info(f"✅ Worker {wid} lancé")
+
+        return lances
+
+
+def _watchdog(interval: int = 30):
+    """
+    Watchdog — surveille les workers et nettoie les sessions expirées.
+    Ne relance PAS un worker arrêté pour saturation CGAWEB (trop d'échecs consécutifs).
+    """
+    logging.info("👁️ Watchdog démarré — surveillance toutes les %ds", interval)
+    while True:
+        time.sleep(interval)
+        try:
+            with _worker_lock:
+
+                # ── Nettoyage sessions utilisateurs expirées ──
+                try:
+                    nettoyer_sessions_expirées(timeout_minutes=30)
+                except Exception as e:
+                    logging.error(f"❌ Watchdog — erreur nettoyage sessions : {e}")
+
+                # ── Worker 1 : toujours vivant ─────────────────
+                try:
+                    w1_vivant = 1 in _workers and _workers[1].is_alive()
+                    if not w1_vivant:
+                        echecs_w1 = _echecs_consecutifs.get(1, 0)
+                        if echecs_w1 >= MAX_ECHECS_CONSECUTIFS:
+                            logging.warning(
+                                f"⚠️ Watchdog — Worker 1 arrêté pour saturation CGAWEB "
+                                f"({echecs_w1} échecs). Pas de relance immédiate."
+                            )
+                            _echecs_consecutifs[1] = 0
+                        else:
+                            logging.warning("⚠️ Watchdog : Worker 1 mort — relance...")
+                            supprimer_verrou_worker(1)
+                            if creer_verrou_worker(1):
+                                t = threading.Thread(
+                                    target=traiter_file_automatique,
+                                    args=(1,),
+                                    daemon=True,
+                                    name="Worker-1"
+                                )
+                                t.start()
+                                _workers[1] = t
+                                logging.info("✅ Watchdog : Worker 1 relancé")
+                except Exception as e:
+                    logging.error(f"❌ Watchdog — erreur relance Worker 1 : {e}")
+
+                # ── Worker 2 : selon la charge ─────────────────
+                try:
+                    nb = compter_requetes_en_attente()
+                    if nb >= SEUIL_DOUBLE_WORKER:
+                        w2_vivant = 2 in _workers and _workers[2].is_alive()
+                        if not w2_vivant:
+                            echecs_w2 = _echecs_consecutifs.get(2, 0)
+                            if echecs_w2 >= MAX_ECHECS_CONSECUTIFS:
+                                logging.warning(
+                                    f"⚠️ Watchdog — Worker 2 arrêté pour saturation CGAWEB "
+                                    f"({echecs_w2} échecs). Pas de relance immédiate."
+                                )
+                                _echecs_consecutifs[2] = 0
+                            else:
+                                logging.warning("⚠️ Watchdog : Worker 2 mort — relance (charge élevée)...")
+                                supprimer_verrou_worker(2)
+                                if creer_verrou_worker(2):
+                                    t = threading.Thread(
+                                        target=traiter_file_automatique,
+                                        args=(2,),
+                                        daemon=True,
+                                        name="Worker-2"
+                                    )
+                                    t.start()
+                                    _workers[2] = t
+                                    logging.info("✅ Watchdog : Worker 2 relancé")
+                except Exception as e:
+                    logging.error(f"❌ Watchdog — erreur relance Worker 2 : {e}")
+
+        except Exception as e:
+            logging.error(f"❌ Watchdog erreur globale (boucle continue) : {e}")
+
+
+@st.cache_resource
+def demarrage_permanent_workers():
+    """
+    FIX #3 — Initialisation du système VISUV.
+    Garde-fou _started pour éviter les lancements multiples liés aux re-runs Streamlit.
+    """
+    global _started
+    if _started:
+        logging.info("⚠️ demarrage_permanent_workers() — déjà initialisé, ignoré.")
+        return []
+
+    _started = True
+    logging.info("🚀 Initialisation du système VISUV...")
+    nettoyer_vieux_verrous()
+
+    # Remettre les slots CGAWEB à zéro au démarrage (crash précédent éventuel)
+    conn   = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("UPDATE cgaweb_sessions SET connecte = 0")
+        conn.commit()
+        logging.info("🔓 Slots CGAWEB remis à zéro au démarrage")
+    except Exception as e:
+        logging.warning(f"⚠️ Impossible de réinitialiser cgaweb_sessions : {e}")
+    finally:
+        cursor.close()  # FIX #5
+        conn.close()
+
+    lances = lancer_worker()
+
+    wd = threading.Thread(
+        target=_watchdog,
+        args=(30,),
+        daemon=True,
+        name="Watchdog"
+    )
+    wd.start()
+
+    logging.info(f"✅ Watchdog actif | Workers lancés : {lances}")
+    return lances
