@@ -35,6 +35,7 @@ sqlalchemy
 streamlit==1.47.0
 streamlit-aggrid
 streamlit-cookies-controller
+selenium
 tenacity
 toml
 tornado
@@ -43,5 +44,3 @@ tzdata
 urllib3
 watchdog
 xlsxwriter
-chromium-driver
-chromium-browser
