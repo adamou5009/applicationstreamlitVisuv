@@ -43,3 +43,5 @@ tzdata
 urllib3
 watchdog
 xlsxwriter
+chromium-driver
+chromium-browser
