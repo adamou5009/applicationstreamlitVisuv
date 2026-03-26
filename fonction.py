@@ -22,141 +22,154 @@ import uuid
 import subprocess
 import logging
 
+import os
+import uuid
+import shutil
+import tempfile
+import logging
+import platform
+
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service as ChromeService
+from selenium.common.exceptions import WebDriverException
+
+
 class WebDriverManager:
     def __init__(self):
         self.driver = None
         self.temp_dir = None
 
     def start_driver(self, headless=True):
-        """
-        Lance le driver Chrome avec isolation complète et mode résilient.
-        Compatible Linux / Streamlit Cloud.
-        Retourne le driver ou None si échec.
-        """
-        # --- 1. Vérifie si une session existe encore ---
+
+        # ✅ 1. Réutilisation session
         if self.driver:
             try:
                 _ = self.driver.title
-                logging.info("⚡ Session Chrome existante valide.")
+                logging.info("⚡ Session existante OK")
                 return self.driver
-            except Exception:
-                logging.warning("⚠️ Session expirée. Redémarrage du navigateur...")
+            except:
+                logging.warning("⚠️ Session morte → restart")
                 self.stop_driver()
 
-        # --- 2. Options Chrome ---
         options = Options()
 
-        # --- 3. Profil temporaire unique ---
+        # ✅ 2. Profil isolé
         unique_id = str(uuid.uuid4())
-        self.temp_dir = os.path.join(tempfile.gettempdir(), f"chrome_session_{os.getpid()}_{unique_id}")
+        self.temp_dir = os.path.join(
+            tempfile.gettempdir(),
+            f"chrome_{os.getpid()}_{unique_id}"
+        )
         options.add_argument(f"--user-data-dir={self.temp_dir}")
 
-        # --- 4. Options stabilité (Linux / headless) ---
-        options.add_argument("--no-sandbox")                    # obligatoire sur Linux
-        options.add_argument("--disable-dev-shm-usage")        # évite les crashs mémoire
+        # ✅ 3. Options stabilité (ULTRA IMPORTANT)
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--disable-gpu")
-        options.add_argument("--disable-notifications")
         options.add_argument("--disable-extensions")
+        options.add_argument("--disable-notifications")
+        options.add_argument("--disable-infobars")
         options.add_argument("--disable-blink-features=AutomationControlled")
-        options.add_argument("--disable-features=OptimizationGuideModelDownloading,OptimizationHintsFetching,OptimizationTargetPrediction,OptimizationHints")
-        options.add_argument("--disable-component-update")
+
         options.add_argument("--no-first-run")
         options.add_argument("--no-default-browser-check")
-        options.add_experimental_option("excludeSwitches", ["enable-logging"])
 
         if headless:
             options.add_argument("--headless=new")
             options.add_argument("--window-size=1920,1080")
-        else:
-            options.add_argument("--start-maximized")
+
+        # ✅ 4. Détection environnement
+        is_linux = platform.system() == "Linux"
 
         try:
-            logging.info("🚀 Initialisation du driver Chrome...")
+            logging.info("🚀 Démarrage Chrome...")
 
-            # --- 5. Tentative avec le binaire système (Streamlit Cloud) ---
-            # Streamlit Cloud fournit Chromium dans ces chemins standard Linux
-            chrome_paths = [
-                "/usr/bin/chromium-browser",
-                "/usr/bin/chromium",
-                "/usr/bin/google-chrome",
-            ]
+            if is_linux:
+                # 🔥 STREAMLIT CLOUD
 
-            chrome_bin = None
-            for path in chrome_paths:
-                if os.path.exists(path):
-                    chrome_bin = path
-                    break
+                chrome_paths = [
+                    "/usr/bin/chromium",
+                    "/usr/bin/chromium-browser",
+                    "/usr/bin/google-chrome",
+                ]
 
-            if chrome_bin:
-                logging.info(f"✅ Binaire Chrome trouvé : {chrome_bin}")
-                options.binary_location = chrome_bin
+                for path in chrome_paths:
+                    if os.path.exists(path):
+                        options.binary_location = path
+                        logging.info(f"✅ Chrome trouvé: {path}")
+                        break
 
-            # --- 6. Tentative avec chromedriver système ---
-            chromedriver_paths = [
-                "/usr/bin/chromedriver",
-                "/usr/lib/chromium-browser/chromedriver",
-                "/usr/lib/chromium/chromedriver",
-            ]
+                chromedriver_paths = [
+                    "/usr/bin/chromedriver",
+                    "/usr/lib/chromium/chromedriver",
+                ]
 
-            chromedriver_bin = None
-            for path in chromedriver_paths:
-                if os.path.exists(path):
-                    chromedriver_bin = path
-                    break
+                service = None
+                for path in chromedriver_paths:
+                    if os.path.exists(path):
+                        service = ChromeService(executable_path=path)
+                        logging.info(f"✅ Driver trouvé: {path}")
+                        break
 
-            try:
-                if chromedriver_bin:
-                    logging.info(f"✅ Chromedriver trouvé : {chromedriver_bin}")
-                    service = ChromeService(executable_path=chromedriver_bin)
+                # 🔥 fallback automatique
+                if service:
                     self.driver = webdriver.Chrome(service=service, options=options)
                 else:
-                    # Fallback : laisse Selenium trouver chromedriver dans le PATH
-                    logging.info("🔄 Chromedriver non trouvé, tentative via PATH...")
+                    logging.warning("⚠️ Driver non trouvé → fallback Selenium")
                     self.driver = webdriver.Chrome(options=options)
 
-            except Exception as e:
-                logging.error(f"❌ Échec démarrage Chrome : {e}")
-                self.cleanup_temp()
-                return None
+            else:
+                # 💻 LOCAL (Windows → Edge possible)
+                logging.info("💻 Mode local détecté")
 
-            # --- 7. Réglages finaux ---
+                try:
+                    # Edge si dispo
+                    from selenium.webdriver.edge.service import Service as EdgeService
+                    from selenium.webdriver.edge.options import Options as EdgeOptions
+
+                    edge_options = EdgeOptions()
+                    edge_options.use_chromium = True
+
+                    if headless:
+                        edge_options.add_argument("--headless=new")
+
+                    self.driver = webdriver.Edge(options=edge_options)
+                    logging.info("✅ Edge lancé")
+
+                except Exception as e:
+                    logging.warning(f"⚠️ Edge KO → fallback Chrome ({e})")
+                    self.driver = webdriver.Chrome(options=options)
+
+            # ✅ 5. Paramètres driver
             self.driver.implicitly_wait(10)
             self.driver.set_page_load_timeout(60)
-            logging.info("✅ Navigateur Chrome démarré avec succès")
+
+            logging.info("✅ Navigateur prêt")
             return self.driver
 
-        except WebDriverException as e:
-            logging.error(f"❌ WebDriverException : {e}")
-            self.cleanup_temp()
-            return None
-
         except Exception as e:
-            logging.error(f"❌ Erreur inattendue : {e}")
+            logging.error(f"❌ Erreur driver: {e}")
             self.cleanup_temp()
             return None
 
     def stop_driver(self):
-        """Ferme proprement le navigateur et nettoie le profil temporaire."""
         if self.driver:
             try:
                 self.driver.quit()
-            except Exception as e:
-                logging.warning(f"⚠️ Erreur fermeture Chrome : {e}")
+            except:
+                pass
             finally:
                 self.driver = None
                 self.cleanup_temp()
-                logging.info("🛑 Navigateur fermé")
+                logging.info("🛑 Driver stoppé")
 
     def cleanup_temp(self):
-        """Supprime le profil temporaire Chrome."""
         if self.temp_dir and os.path.exists(self.temp_dir):
             try:
                 shutil.rmtree(self.temp_dir, ignore_errors=True)
-                logging.info(f"🧹 Profil supprimé : {self.temp_dir}")
-            except Exception as e:
-                logging.warning(f"⚠️ Échec nettoyage profil temporaire : {e}")
-            finally:
-                self.temp_dir = None
+            except:
+                pass
+            self.temp_dir = None
 
 
 
