@@ -100,10 +100,9 @@ import tempfile
 import shutil
 import logging
 from selenium import webdriver
-from selenium.webdriver.edge.service import Service as EdgeService
-from selenium.webdriver.edge.options import Options
+from selenium.webdriver.chrome.service import Service as ChromeService
+from selenium.webdriver.chrome.options import Options
 from selenium.common.exceptions import WebDriverException
-from webdriver_manager.microsoft import EdgeChromiumDriverManager
 
 class WebDriverManager:
     def __init__(self):
@@ -112,36 +111,35 @@ class WebDriverManager:
 
     def start_driver(self, headless=True):
         """
-        Lance le driver Edge avec isolation complète et mode résilient.
+        Lance le driver Chrome avec isolation complète et mode résilient.
+        Compatible Linux / Streamlit Cloud.
         Retourne le driver ou None si échec.
         """
         # --- 1. Vérifie si une session existe encore ---
         if self.driver:
             try:
                 _ = self.driver.title
-                logging.info("⚡ Session Edge existante valide.")
+                logging.info("⚡ Session Chrome existante valide.")
                 return self.driver
             except Exception:
                 logging.warning("⚠️ Session expirée. Redémarrage du navigateur...")
                 self.stop_driver()
 
-        # --- 2. Options Edge ---
+        # --- 2. Options Chrome ---
         options = Options()
-        options.use_chromium = True
 
         # --- 3. Profil temporaire unique ---
         unique_id = str(uuid.uuid4())
-        self.temp_dir = os.path.join(tempfile.gettempdir(), f"edge_session_{os.getpid()}_{unique_id}")
+        self.temp_dir = os.path.join(tempfile.gettempdir(), f"chrome_session_{os.getpid()}_{unique_id}")
         options.add_argument(f"--user-data-dir={self.temp_dir}")
 
-        # --- 4. Options stabilité ---
-        options.add_argument("--start-maximized")
+        # --- 4. Options stabilité (Linux / headless) ---
+        options.add_argument("--no-sandbox")                    # obligatoire sur Linux
+        options.add_argument("--disable-dev-shm-usage")        # évite les crashs mémoire
+        options.add_argument("--disable-gpu")
         options.add_argument("--disable-notifications")
         options.add_argument("--disable-extensions")
         options.add_argument("--disable-blink-features=AutomationControlled")
-        options.add_argument("--no-sandbox")
-        options.add_argument("--disable-dev-shm-usage")
-        options.add_argument("--disable-gpu")
         options.add_argument("--disable-features=OptimizationGuideModelDownloading,OptimizationHintsFetching,OptimizationTargetPrediction,OptimizationHints")
         options.add_argument("--disable-component-update")
         options.add_argument("--no-first-run")
@@ -151,28 +149,62 @@ class WebDriverManager:
         if headless:
             options.add_argument("--headless=new")
             options.add_argument("--window-size=1920,1080")
+        else:
+            options.add_argument("--start-maximized")
 
         try:
-            logging.info("🚀 Initialisation du driver Edge...")
+            logging.info("🚀 Initialisation du driver Chrome...")
 
-            # --- 5. Tentative online avec EdgeChromiumDriverManager ---
+            # --- 5. Tentative avec le binaire système (Streamlit Cloud) ---
+            # Streamlit Cloud fournit Chromium dans ces chemins standard Linux
+            chrome_paths = [
+                "/usr/bin/chromium-browser",
+                "/usr/bin/chromium",
+                "/usr/bin/google-chrome",
+            ]
+
+            chrome_bin = None
+            for path in chrome_paths:
+                if os.path.exists(path):
+                    chrome_bin = path
+                    break
+
+            if chrome_bin:
+                logging.info(f"✅ Binaire Chrome trouvé : {chrome_bin}")
+                options.binary_location = chrome_bin
+
+            # --- 6. Tentative avec chromedriver système ---
+            chromedriver_paths = [
+                "/usr/bin/chromedriver",
+                "/usr/lib/chromium-browser/chromedriver",
+                "/usr/lib/chromium/chromedriver",
+            ]
+
+            chromedriver_bin = None
+            for path in chromedriver_paths:
+                if os.path.exists(path):
+                    chromedriver_bin = path
+                    break
+
             try:
-                service = EdgeService(EdgeChromiumDriverManager().install())
-                self.driver = webdriver.Edge(service=service, options=options)
-            except Exception as net_error:
-                logging.warning(f"⚠️ Driver Manager échoué : {net_error}")
-                logging.info("🔄 Tentative avec driver local du PATH...")
-                try:
-                    self.driver = webdriver.Edge(options=options)
-                except Exception as local_error:
-                    logging.error(f"❌ Échec driver local : {local_error}")
-                    self.cleanup_temp()
-                    return None
+                if chromedriver_bin:
+                    logging.info(f"✅ Chromedriver trouvé : {chromedriver_bin}")
+                    service = ChromeService(executable_path=chromedriver_bin)
+                    self.driver = webdriver.Chrome(service=service, options=options)
+                else:
+                    # Fallback : laisse Selenium trouver chromedriver dans le PATH
+                    logging.info("🔄 Chromedriver non trouvé, tentative via PATH...")
+                    self.driver = webdriver.Chrome(options=options)
 
-            # --- 6. Réglages finaux ---
+            except Exception as e:
+                logging.error(f"❌ Échec démarrage Chrome : {e}")
+                self.cleanup_temp()
+                return None
+
+            # --- 7. Réglages finaux ---
             self.driver.implicitly_wait(10)
             self.driver.set_page_load_timeout(60)
-            logging.info("✅ Navigateur Edge démarré avec succès")
+            logging.info("✅ Navigateur Chrome démarré avec succès")
             return self.driver
 
         except WebDriverException as e:
@@ -191,14 +223,14 @@ class WebDriverManager:
             try:
                 self.driver.quit()
             except Exception as e:
-                logging.warning(f"⚠️ Erreur fermeture Edge : {e}")
+                logging.warning(f"⚠️ Erreur fermeture Chrome : {e}")
             finally:
                 self.driver = None
                 self.cleanup_temp()
                 logging.info("🛑 Navigateur fermé")
 
     def cleanup_temp(self):
-        """Supprime le profil temporaire Edge."""
+        """Supprime le profil temporaire Chrome."""
         if self.temp_dir and os.path.exists(self.temp_dir):
             try:
                 shutil.rmtree(self.temp_dir, ignore_errors=True)
