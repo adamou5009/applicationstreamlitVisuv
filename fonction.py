@@ -3,106 +3,24 @@ from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, WebDriverException
-from selenium.webdriver.edge.options import Options as EdgeOptions
-from selenium.webdriver.edge.service import Service as EdgeService
-from selenium.common.exceptions import StaleElementReferenceException
-from selenium.common.exceptions import TimeoutException, NoSuchElementException
+from selenium.common.exceptions import (
+    TimeoutException, WebDriverException,
+    StaleElementReferenceException, NoSuchElementException
+)
+from selenium.webdriver.chrome.service import Service as ChromeService
+from selenium.webdriver.chrome.options import Options
 from concurrent.futures import ThreadPoolExecutor
-
 from datetime import datetime
 from io import BytesIO
 import time
 import hashlib
-import os     
-import json
-import time 
-
 import os
+import json
 import shutil
 import tempfile
 import uuid
 import subprocess
-import ctypes
-import ctypes.wintypes
-import time
-
-from selenium import webdriver
-from selenium.webdriver.edge.service import Service as EdgeService
-from selenium.webdriver.edge.options import Options
-
-
-# ══════════════════════════════════════════════════════════
-# Windows API — Bureau virtuel invisible
-# ══════════════════════════════════════════════════════════
-DESKTOP_CREATEWINDOW    = 0x0002
-DESKTOP_WRITEOBJECTS    = 0x0080
-DESKTOP_SWITCHDESKTOP   = 0x0100
-GENERIC_ALL             = 0x10000000
-
-CreateDesktop  = ctypes.windll.user32.CreateDesktopW
-OpenDesktop    = ctypes.windll.user32.OpenDesktopW
-CloseDesktop   = ctypes.windll.user32.CloseDesktop
-SetThreadDesktop = ctypes.windll.user32.SetThreadDesktop
-
-
-def _lancer_edge_sur_bureau_virtuel(service, options):
-    """
-    Lance Edge sur un bureau virtuel invisible.
-    Le processus tourne en arrière-plan total :
-    - Aucune fenêtre visible
-    - Aucune icône dans la barre des tâches
-    - Interactions Selenium 100% fonctionnelles
-    """
-    desktop_name = f"EdgeDesk_{uuid.uuid4().hex[:8]}"
-    driver_container = {"driver": None, "error": None}
-
-    def thread_func():
-        # Créer un bureau virtuel invisible
-        hdesk = CreateDesktop(
-            desktop_name,
-            None, None, 0,
-            GENERIC_ALL,
-            None
-        )
-
-        if not hdesk:
-            driver_container["error"] = "Impossible de créer le bureau virtuel"
-            return
-
-        try:
-            # Attacher ce thread au bureau virtuel
-            SetThreadDesktop(hdesk)
-
-            # Lancer Edge sur ce bureau virtuel
-            driver = webdriver.Edge(service=service, options=options)
-            driver_container["driver"] = driver
-
-        except Exception as e:
-            driver_container["error"] = str(e)
-        finally:
-            CloseDesktop(hdesk)
-
-    import threading
-    t = threading.Thread(target=thread_func, daemon=True)
-    t.start()
-    t.join(timeout=30)
-
-    if driver_container["error"]:
-        raise Exception(f"Bureau virtuel échoué : {driver_container['error']}")
-
-    return driver_container["driver"]
-
-
-import os
-import uuid
-import tempfile
-import shutil
 import logging
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service as ChromeService
-from selenium.webdriver.chrome.options import Options
-from selenium.common.exceptions import WebDriverException
 
 class WebDriverManager:
     def __init__(self):
