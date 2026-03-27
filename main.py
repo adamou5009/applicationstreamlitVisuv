@@ -126,15 +126,6 @@ def main():
         import connexion
         import inscription
 
-        st.markdown(
-            """
-            <div style="padding:20px;background:#fef3c7;border:1px solid #fde68a;
-                        border-radius:10px;margin-bottom:16px;">
-                <i class="fa-solid fa-circle-exclamation" style="color:#b45309;margin-right:8px;"></i>
-                Veuillez vous connecter pour accéder aux fonctionnalités.
-            </div>
-            """, unsafe_allow_html=True
-        )
 
         if st.session_state.page_active == "inscription":
             inscription.page_inscription()
