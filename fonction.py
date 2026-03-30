@@ -1658,13 +1658,15 @@ import streamlit as st
 
 @contextmanager
 def get_connection():
-    """Connexion MySQL via context manager — utilisée dans tout le projet."""
     conn = mysql.connector.connect(
         host=st.secrets["DB_HOST"],
         user=st.secrets["DB_USER"],
         password=st.secrets["DB_PASSWORD"],
         database=st.secrets["DB_NAME"],
-        port=int(st.secrets.get("DB_PORT", 3306))
+        port=int(st.secrets["DB_PORT"]),
+        ssl_ca=False,
+        ssl_verify_cert=False,
+        ssl_verify_identity=False
     )
     try:
         yield conn
@@ -1675,13 +1677,15 @@ def get_connection():
             pass
 
 def get_db_connection():
-    """Connexion MySQL directe — pour main.py et les modules qui n'utilisent pas le context manager."""
     return mysql.connector.connect(
         host=st.secrets["DB_HOST"],
         user=st.secrets["DB_USER"],
         password=st.secrets["DB_PASSWORD"],
         database=st.secrets["DB_NAME"],
-        port=int(st.secrets.get("DB_PORT", 3306))
+        port=int(st.secrets["DB_PORT"]),
+        ssl_ca=False,
+        ssl_verify_cert=False,
+        ssl_verify_identity=False
     )
 
 def hash_mot_de_passe(mot_de_passe: str) -> str:
