@@ -1652,17 +1652,17 @@ import os
 
 @contextmanager
 def get_connection():
+    from contextlib import contextmanager
     import os
-    host     = st.secrets.get("DB_HOST",     os.getenv("DB_HOST",     "mysql-36428e24-visuv-project.i.aivencloud.com"))
-    user     = st.secrets.get("DB_USER",     os.getenv("DB_USER",     "avnadmin"))
-    password = st.secrets.get("DB_PASSWORD", os.getenv("DB_PASSWORD", ""))
-    database = st.secrets.get("DB_NAME",     os.getenv("DB_NAME",     "defaultdb"))
-    port     = int(st.secrets.get("DB_PORT", os.getenv("DB_PORT",     "18703")))
-
     conn = mysql.connector.connect(
-        host=host, user=user, password=password,
-        database=database, port=port,
-        ssl_ca=False, ssl_verify_cert=False, ssl_verify_identity=False
+        host=st.secrets.get("DB_HOST", "mysql-36428e24-visuv-project.i.aivencloud.com"),
+        user=st.secrets.get("DB_USER", "avnadmin"),
+        password=st.secrets["DB_PASSWORD"],
+        database=st.secrets.get("DB_NAME", "visuv_cga_db"),
+        port=int(st.secrets.get("DB_PORT", "18703")),
+        ssl_ca=False,
+        ssl_verify_cert=False,
+        ssl_verify_identity=False
     )
     try:
         yield conn
@@ -1673,17 +1673,15 @@ def get_connection():
             pass
 
 def get_db_connection():
-    import os
-    host     = st.secrets.get("DB_HOST",     os.getenv("DB_HOST",     "mysql-36428e24-visuv-project.i.aivencloud.com"))
-    user     = st.secrets.get("DB_USER",     os.getenv("DB_USER",     "avnadmin"))
-    password = st.secrets.get("DB_PASSWORD", os.getenv("DB_PASSWORD", ""))
-    database = st.secrets.get("DB_NAME",     os.getenv("DB_NAME",     "defaultdb"))
-    port     = int(st.secrets.get("DB_PORT", os.getenv("DB_PORT",     "18703")))
-
     return mysql.connector.connect(
-        host=host, user=user, password=password,
-        database=database, port=port,
-        ssl_ca=False, ssl_verify_cert=False, ssl_verify_identity=False
+        host=st.secrets.get("DB_HOST", "mysql-36428e24-visuv-project.i.aivencloud.com"),
+        user=st.secrets.get("DB_USER", "avnadmin"),
+        password=st.secrets["DB_PASSWORD"],
+        database=st.secrets.get("DB_NAME", "visuv_cga_db"),
+        port=int(st.secrets.get("DB_PORT", "18703")),
+        ssl_ca=False,
+        ssl_verify_cert=False,
+        ssl_verify_identity=False
     )
 
 def hash_mot_de_passe(mot_de_passe: str) -> str:
