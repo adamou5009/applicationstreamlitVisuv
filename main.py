@@ -52,13 +52,18 @@ def restaurer_session_depuis_cookie():
     if st.session_state.get("connecte"):
         return
 
-    token = cookie.get("visuv_session")
+    # Protection contre le CookieController non initialisé
+    try:
+        token = cookie.get("visuv_session")
+    except Exception:
+        return
+
     if not token:
         return
 
     try:
-        from fonction import get_connection
-        conn   = get_connection()
+        from fonction import get_db_connection
+        conn   = get_db_connection()
         cursor = conn.cursor(dictionary=True)
         cursor.execute(
             "SELECT utilisateur, role FROM sessions_actives WHERE token = %s AND active = 1",
@@ -83,7 +88,7 @@ def restaurer_session_depuis_cookie():
 
     except Exception as e:
         import logging
-        logging.error(f" Erreur restauration session : {e}")
+        logging.error(f"Erreur restauration session : {e}")
 
 restaurer_session_depuis_cookie()
 
