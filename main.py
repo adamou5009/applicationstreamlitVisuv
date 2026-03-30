@@ -57,8 +57,8 @@ def restaurer_session_depuis_cookie():
         return
 
     try:
-        from file_attente import get_db_connection
-        conn   = get_db_connection()
+        from fonction import get_connection
+        conn   = get_connection()
         cursor = conn.cursor(dictionary=True)
         cursor.execute(
             "SELECT utilisateur, role FROM sessions_actives WHERE token = %s AND active = 1",
@@ -83,7 +83,7 @@ def restaurer_session_depuis_cookie():
 
     except Exception as e:
         import logging
-        logging.error(f"❌ Erreur restauration session : {e}")
+        logging.error(f" Erreur restauration session : {e}")
 
 restaurer_session_depuis_cookie()
 
