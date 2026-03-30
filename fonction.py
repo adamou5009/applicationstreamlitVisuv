@@ -1646,29 +1646,44 @@ import logging
 import pandas as pd
 from cryptography.fernet import Fernet
 
+# =========================================================
+# 🔌 CONNEXION MYSQL — SOURCE UNIQUE
+# =========================================================
+from contextlib import contextmanager
+from mysql.connector import Error
+import mysql.connector
+import logging
+import streamlit as st
 
-# =========================================================
-# 🔌 CONNEXION MYSQL (ROBUSTE + POOL)
-# =========================================================
+@contextmanager
 def get_connection():
+    """
+    Context manager — connexion MySQL via st.secrets.
+    Usage : with get_connection() as conn: ...
+    Garantit la fermeture même en cas d'exception.
+    """
+    conn = None
     try:
         conn = mysql.connector.connect(
-            host=st.secrets.get("DB_HOST"),
-            user=st.secrets.get("DB_USER"),
-            password=st.secrets.get("DB_PASSWORD"),
-            database=st.secrets.get("DB_NAME"),
-            port=3306,
-            pool_name="mypool",
-            pool_size=5,
-            connection_timeout=10
+            host               = st.secrets["DB_HOST"],
+            user               = st.secrets["DB_USER"],
+            password           = st.secrets["DB_PASSWORD"],
+            database           = st.secrets["DB_NAME"],
+            port               = 3306,
+            pool_name          = "visuv_pool",
+            pool_size          = 5,
+            connection_timeout = 10
         )
-        if conn.is_connected():
-            return conn
-        return None
+        if not conn.is_connected():
+            raise RuntimeError("Connexion MySQL établie mais inactive.")
+        yield conn
 
     except Error as e:
-        logging.error(f"MySQL error: {e}")
-        return None
+        logging.error(f"MySQL error : {e}")
+        raise
+    finally:
+        if conn and conn.is_connected():
+            conn.close()
 
 
 # =========================================================
