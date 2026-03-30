@@ -1724,10 +1724,9 @@ def enregistrer_utilisateur(nom, username, telephone, email, mot_de_passe, role=
     except mysql.connector.Error as err:
         if err.errno == 1062:
             return False, "Compte déjà existant"
-        return False, str(err)
+        return False, str(err)   # ← affiche l'erreur MySQL exacte
     except Exception as e:
-        logging.error(f"Erreur enregistrer_utilisateur : {e}")
-        return False, "Connexion BD impossible"
+        return False, f"Erreur: {str(e)}"  # ← affiche l'erreur exacte au lieu de "Connexion BD impossible"
 
 
 def verifier_identifiants(username, password):
