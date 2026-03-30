@@ -1659,23 +1659,43 @@ import streamlit as st
 def get_connection():
     """
     Context manager — connexion MySQL via st.secrets.
+    Compatible Aiven (port custom + SSL) et local (sans SSL).
     Usage : with get_connection() as conn: ...
-    Garantit la fermeture même en cas d'exception.
     """
-    conn = None
+    import tempfile, os
+    conn    = None
+    ca_file = None
+
     try:
-        conn = mysql.connector.connect(
+        # --- Certificat CA (Aiven SSL) ---
+        ca_cert = st.secrets.get("DB_CA_CERT", "")
+        if ca_cert and ca_cert.strip():
+            tmp = tempfile.NamedTemporaryFile(
+                mode="w", suffix=".pem", delete=False
+            )
+            tmp.write(ca_cert)
+            tmp.close()
+            ca_file = tmp.name
+
+        # --- Paramètres de connexion ---
+        params = dict(
             host               = st.secrets["DB_HOST"],
             user               = st.secrets["DB_USER"],
             password           = st.secrets["DB_PASSWORD"],
             database           = st.secrets["DB_NAME"],
-            port               = 3306,
-            pool_name          = "visuv_pool",
-            pool_size          = 5,
-            connection_timeout = 10
+            port               = int(st.secrets.get("DB_PORT", 3306)),
+            connection_timeout = 10,
         )
+
+        if ca_file:
+            params["ssl_ca"]       = ca_file
+            params["ssl_verify_cert"] = True
+
+        conn = mysql.connector.connect(**params)
+
         if not conn.is_connected():
             raise RuntimeError("Connexion MySQL établie mais inactive.")
+
         yield conn
 
     except Error as e:
@@ -1684,6 +1704,8 @@ def get_connection():
     finally:
         if conn and conn.is_connected():
             conn.close()
+        if ca_file and os.path.exists(ca_file):
+            os.remove(ca_file)
 
 
 # =========================================================
