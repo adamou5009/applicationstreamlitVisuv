@@ -8,17 +8,9 @@ from datetime import datetime
 import streamlit as st
 from selenium.webdriver.remote.webelement import WebElement
 
-from fonction import connexion_cgaweb, deconnexion_cgaweb, rechercher_par_numero, get_connection, WebDriverManager, action_abonne
+from fonction import connexion_cgaweb, deconnexion_cgaweb, rechercher_par_numero, get_connection, WebDriverManager, action_abonne,get_connection
 
-# =========================================================
-# ⚙️ 1. CONFIGURATION & ÉTAT GLOBAL
-# =========================================================
-DB_CONFIG = {
-    "host":     "localhost",
-    "user":     "root",
-    "password": "",
-    "database": "visuv_cga_db"
-}
+
 
 SEUIL_DOUBLE_WORKER    = 150
 WORKER_LOCK_FILE       = "worker_{}.lock"
@@ -35,15 +27,9 @@ _started              = False  # FIX #3 — garde-fou contre les lancements mult
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 
-# =========================================================
-# 🗄️ 2. GESTION DE LA BASE DE DONNÉES (SQL)
-# =========================================================
-def get_db_connection():
-    return mysql.connector.connect(**DB_CONFIG)
-
 
 def ajouter_log_sql(req_id, message):
-    conn = get_db_connection()
+    conn = get_connection()
     cursor = conn.cursor()
     try:
         cursor.execute(
@@ -59,7 +45,7 @@ def ajouter_log_sql(req_id, message):
 
 
 def mettre_a_jour_requete(req_id, statut=None, resultat=None, logs=None, worker_id=None):
-    conn = get_db_connection()
+    conn = get_connection()
     cursor = conn.cursor()
     try:
         updates, params = [], []
@@ -96,7 +82,7 @@ def mettre_a_jour_requete(req_id, statut=None, resultat=None, logs=None, worker_
 
 
 def ajouter_requete(utilisateur, type_recherche, valeur):
-    conn = get_db_connection()
+    conn = get_connection()
     cursor = conn.cursor()
     try:
         req_id = int(time.time() * 1000)
@@ -116,7 +102,7 @@ def ajouter_requete(utilisateur, type_recherche, valeur):
 
 
 def lire_requete_par_id(req_id):
-    conn = get_db_connection()
+    conn = get_connection()
     cursor = conn.cursor(dictionary=True)
     try:
         cursor.execute("SELECT * FROM requetes WHERE id = %s", (req_id,))
@@ -158,7 +144,7 @@ def nettoyer_resultat(res):
 
 
 def compter_requetes_en_attente():
-    conn = get_db_connection()
+    conn = get_connection()
     cursor = conn.cursor()
     try:
         cursor.execute("SELECT COUNT(*) FROM requetes WHERE statut = 'en_attente'")
@@ -172,7 +158,7 @@ def compter_requetes_en_attente():
 
 def lire_file():
     """Retourne les requêtes en_attente et en_cours (pour le tableau de bord)."""
-    conn = get_db_connection()
+    conn = get_connection()
     cursor = conn.cursor(dictionary=True)
     try:
         cursor.execute(
@@ -186,7 +172,7 @@ def lire_file():
 
 def lire_historique():
     """Retourne les 50 dernières requêtes terminées/échouées/abandonnées."""
-    conn = get_db_connection()
+    conn = get_connection()
     cursor = conn.cursor(dictionary=True)
     try:
         cursor.execute(
@@ -252,7 +238,7 @@ def supprimer_verrou_worker(worker_id):
 def utilisateur_est_connecte(user):
     """Vérifie en base si l'utilisateur a une session active."""
     try:
-        conn   = get_db_connection()
+        conn   = get_connection()
         cursor = conn.cursor(dictionary=True)
         try:
             cursor.execute(
@@ -287,7 +273,7 @@ def verifier_et_abandonner(worker_id, req_id, utilisateur):
 # =========================================================
 def nettoyer_sessions_expirées(timeout_minutes: int = SESSION_TIMEOUT_MINUTES):
     """Expire les sessions inactives depuis plus de timeout_minutes minutes."""
-    conn   = get_db_connection()
+    conn   = get_connection()
     cursor = conn.cursor()
     try:
         cursor.execute(
@@ -336,7 +322,7 @@ def reset_saturation_cgaweb():
     Débloque CGAWEB après saturation.
     Retourne False proprement si la table n'existe pas.
     """
-    conn   = get_db_connection()
+    conn   = get_connection()
     cursor = conn.cursor()
     try:
         cursor.execute(
@@ -366,7 +352,7 @@ def _est_cgaweb_bloque():
     Vérifie si CGAWEB est marqué comme bloqué en base.
     Retourne False sans erreur si la table cgaweb_statut n'existe pas encore.
     """
-    conn   = get_db_connection()
+    conn   = get_connection()
     cursor = conn.cursor(dictionary=True)
     try:
         cursor.execute("SELECT bloque FROM cgaweb_statut WHERE id = 1")
@@ -393,7 +379,7 @@ def _est_cgaweb_bloque():
 # 🔐 7. GESTION DES SESSIONS CGAWEB (anti-saturation)
 # =========================================================
 def _compter_sessions_cgaweb_actives():
-    conn   = get_db_connection()
+    conn   = get_connection()
     cursor = conn.cursor()
     try:
         cursor.execute("SELECT COUNT(*) FROM cgaweb_sessions WHERE connecte = 1")
@@ -407,7 +393,7 @@ def _compter_sessions_cgaweb_actives():
 
 
 def _marquer_session_cgaweb(worker_id, connecte: bool):
-    conn   = get_db_connection()
+    conn   = get_connection()
     cursor = conn.cursor()
     try:
         cursor.execute(
@@ -431,7 +417,7 @@ def _attendre_slot_cgaweb(worker_id, timeout=120, intervalle=3):
         try:
             actives = _compter_sessions_cgaweb_actives()
 
-            conn   = get_db_connection()
+            conn   = get_connection()
             cursor = conn.cursor()
             try:
                 cursor.execute(
@@ -669,7 +655,7 @@ def traiter_file_automatique(worker_id, pause=0.2, retry_pause=5, check_interval
 
             # ── 1. RÉCUPÉRATION DE LA TÂCHE ──────────────────
             try:
-                conn   = get_db_connection()
+                conn   = get_connection()
                 cursor = conn.cursor(dictionary=True)
                 try:
                     query = "SELECT * FROM requetes WHERE statut = 'en_attente' "
@@ -1026,7 +1012,7 @@ def demarrage_permanent_workers():
     nettoyer_vieux_verrous()
 
     # Remettre les slots CGAWEB à zéro au démarrage (crash précédent éventuel)
-    conn   = get_db_connection()
+    conn   = get_connection()
     cursor = conn.cursor()
     try:
         cursor.execute("UPDATE cgaweb_sessions SET connecte = 0")
