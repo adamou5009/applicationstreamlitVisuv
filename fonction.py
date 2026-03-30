@@ -1649,11 +1649,58 @@ from cryptography.fernet import Fernet
 # =========================================================
 # 🔌 CONNEXION MYSQL — SOURCE UNIQUE
 # =========================================================
+# =========================================================
+# 🔌 CONNEXION MYSQL — SOURCE UNIQUE
+# =========================================================
 from contextlib import contextmanager
-from mysql.connector import Error
 import mysql.connector
-import logging
 import streamlit as st
+
+@contextmanager
+def get_connection():
+    """Connexion MySQL via context manager — utilisée dans tout le projet."""
+    conn = mysql.connector.connect(
+        host=st.secrets["DB_HOST"],
+        user=st.secrets["DB_USER"],
+        password=st.secrets["DB_PASSWORD"],
+        database=st.secrets["DB_NAME"],
+        port=int(st.secrets.get("DB_PORT", 3306))
+    )
+    try:
+        yield conn
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+def get_db_connection():
+    """Connexion MySQL directe — pour main.py et les modules qui n'utilisent pas le context manager."""
+    return mysql.connector.connect(
+        host=st.secrets["DB_HOST"],
+        user=st.secrets["DB_USER"],
+        password=st.secrets["DB_PASSWORD"],
+        database=st.secrets["DB_NAME"],
+        port=int(st.secrets.get("DB_PORT", 3306))
+    )
+
+def hash_mot_de_passe(mot_de_passe: str) -> str:
+    import hashlib
+    return hashlib.sha256(mot_de_passe.encode()).hexdigest()
+
+def chiffrer(valeur: str) -> str:
+    from cryptography.fernet import Fernet
+    key = st.secrets["FERNET_KEY"]
+    return Fernet(key.encode()).encrypt(valeur.encode()).decode()
+
+def dechiffrer(valeur: str) -> str:
+    from cryptography.fernet import Fernet
+    key = st.secrets["FERNET_KEY"]
+    return Fernet(key.encode()).decrypt(valeur.encode()).decode()
+
+def _est_chiffre(valeur: str) -> bool:
+    return isinstance(valeur, str) and valeur.startswith("gAAAAA")
+
 
 # =========================================================
 # 👤 UTILISATEURS
