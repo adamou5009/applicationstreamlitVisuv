@@ -1655,312 +1655,190 @@ import mysql.connector
 import logging
 import streamlit as st
 
-@contextmanager
-def get_connection():
-    """
-    Context manager — connexion MySQL via st.secrets.
-    Compatible Aiven (port custom + SSL) et local (sans SSL).
-    Usage : with get_connection() as conn: ...
-    """
-    import tempfile, os
-    conn    = None
-    ca_file = None
-
-    try:
-        # --- Certificat CA (Aiven SSL) ---
-        ca_cert = st.secrets.get("DB_CA_CERT", "")
-        if ca_cert and ca_cert.strip():
-            tmp = tempfile.NamedTemporaryFile(
-                mode="w", suffix=".pem", delete=False
-            )
-            tmp.write(ca_cert)
-            tmp.close()
-            ca_file = tmp.name
-
-        # --- Paramètres de connexion ---
-        params = dict(
-            host               = st.secrets["DB_HOST"],
-            user               = st.secrets["DB_USER"],
-            password           = st.secrets["DB_PASSWORD"],
-            database           = st.secrets["DB_NAME"],
-            port               = int(st.secrets.get("DB_PORT", 3306)),
-            connection_timeout = 10,
-        )
-
-        if ca_file:
-            params["ssl_ca"]       = ca_file
-            params["ssl_verify_cert"] = True
-
-        conn = mysql.connector.connect(**params)
-
-        if not conn.is_connected():
-            raise RuntimeError("Connexion MySQL établie mais inactive.")
-
-        yield conn
-
-    except Error as e:
-        logging.error(f"MySQL error : {e}")
-        raise
-    finally:
-        if conn and conn.is_connected():
-            conn.close()
-        if ca_file and os.path.exists(ca_file):
-            os.remove(ca_file)
-
-
-# =========================================================
-# 🔐 HASH MOT DE PASSE
-# =========================================================
-def hash_mot_de_passe(mdp):
-    return hashlib.sha256(mdp.encode("utf-8")).hexdigest()
-
-
-# =========================================================
-# 🔒 CHIFFREMENT FERNET
-# =========================================================
-def _get_fernet():
-    cle = os.environ.get("VISUV_SECRET_KEY") or st.secrets.get("VISUV_SECRET_KEY")
-    if not cle:
-        raise RuntimeError("Clé Fernet manquante")
-    return Fernet(cle.encode())
-
-
-def chiffrer(valeur):
-    return _get_fernet().encrypt(valeur.encode()).decode()
-
-
-def dechiffrer(valeur):
-    try:
-        return _get_fernet().decrypt(valeur.encode()).decode()
-    except:
-        return valeur
-
-
-def _est_chiffre(valeur):
-    return isinstance(valeur, str) and valeur.startswith("gAAAAA")
-
-
 # =========================================================
 # 👤 UTILISATEURS
 # =========================================================
 def enregistrer_utilisateur(nom, username, telephone, email, mot_de_passe, role="Utilisateur"):
-    conn = get_connection()
-    if not conn:
-        return False, "Connexion BD impossible"
-
-    cursor = conn.cursor()
     mdp_hash = hash_mot_de_passe(mot_de_passe)
-
     try:
-        cursor.execute("""
-            INSERT INTO utilisateurs (nom, username, telephone, email, mot_de_passe, role)
-            VALUES (%s, %s, %s, %s, %s, %s)
-        """, (nom, username, telephone, email, mdp_hash, role))
-        conn.commit()
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO utilisateurs (nom, username, telephone, email, mot_de_passe, role)
+                VALUES (%s, %s, %s, %s, %s, %s)
+            """, (nom, username, telephone, email, mdp_hash, role))
+            conn.commit()
+            cursor.close()
         return True, "Inscription réussie"
-
     except mysql.connector.Error as err:
         if err.errno == 1062:
             return False, "Compte déjà existant"
         return False, str(err)
-
-    finally:
-        cursor.close()
-        conn.close()
+    except Exception as e:
+        logging.error(f"Erreur enregistrer_utilisateur : {e}")
+        return False, "Connexion BD impossible"
 
 
 def verifier_identifiants(username, password):
-    conn = get_connection()
-    if not conn:
-        return False, None
-
-    cursor = conn.cursor(dictionary=True)
     mdp_hash = hash_mot_de_passe(password)
-
     try:
-        cursor.execute("""
-            SELECT role FROM utilisateurs
-            WHERE BINARY username=%s AND BINARY mot_de_passe=%s
-        """, (username, mdp_hash))
-
-        user = cursor.fetchone()
+        with get_connection() as conn:
+            cursor = conn.cursor(dictionary=True)
+            cursor.execute("""
+                SELECT role FROM utilisateurs
+                WHERE BINARY username=%s AND BINARY mot_de_passe=%s
+            """, (username, mdp_hash))
+            user = cursor.fetchone()
+            cursor.close()
         return (True, user["role"]) if user else (False, None)
-
-    finally:
-        cursor.close()
-        conn.close()
+    except Exception as e:
+        logging.error(f"Erreur verifier_identifiants : {e}")
+        return False, None
 
 
 def charger_utilisateurs():
-    conn = get_connection()
-    if not conn:
-        return pd.DataFrame()
-
-    cursor = conn.cursor(dictionary=True)
-
     try:
-        cursor.execute("""
-            SELECT id, nom, username, telephone, email, role,
-            DATE_FORMAT(date_creation, '%d/%m/%Y') AS date_creation
-            FROM utilisateurs
-        """)
-        return pd.DataFrame(cursor.fetchall())
-
-    finally:
-        cursor.close()
-        conn.close()
+        with get_connection() as conn:
+            cursor = conn.cursor(dictionary=True)
+            cursor.execute("""
+                SELECT id, nom, username, telephone, email, role,
+                DATE_FORMAT(date_creation, '%d/%m/%Y') AS date_creation
+                FROM utilisateurs
+            """)
+            rows = cursor.fetchall()
+            cursor.close()
+        return pd.DataFrame(rows)
+    except Exception as e:
+        logging.error(f"Erreur charger_utilisateurs : {e}")
+        return pd.DataFrame()
 
 
 def supprimer_utilisateur(user_id):
-    conn = get_connection()
-    if not conn:
-        return
-
-    cursor = conn.cursor()
     try:
-        cursor.execute("DELETE FROM utilisateurs WHERE id=%s", (user_id,))
-        conn.commit()
-    finally:
-        cursor.close()
-        conn.close()
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM utilisateurs WHERE id=%s", (user_id,))
+            conn.commit()
+            cursor.close()
+    except Exception as e:
+        logging.error(f"Erreur supprimer_utilisateur : {e}")
 
 
 def modifier_utilisateur(user_id, infos):
-    conn = get_connection()
-    if not conn:
-        return False
-
-    cursor = conn.cursor()
-
     try:
-        if infos.get("mot_de_passe"):
-            mdp_hash = hash_mot_de_passe(infos["mot_de_passe"])
-            cursor.execute("""
-                UPDATE utilisateurs
-                SET nom=%s, telephone=%s, email=%s, role=%s, mot_de_passe=%s
-                WHERE id=%s
-            """, (infos["nom"], infos["telephone"], infos["email"], infos["role"], mdp_hash, user_id))
-        else:
-            cursor.execute("""
-                UPDATE utilisateurs
-                SET nom=%s, telephone=%s, email=%s, role=%s
-                WHERE id=%s
-            """, (infos["nom"], infos["telephone"], infos["email"], infos["role"], user_id))
-
-        conn.commit()
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            if infos.get("mot_de_passe"):
+                mdp_hash = hash_mot_de_passe(infos["mot_de_passe"])
+                cursor.execute("""
+                    UPDATE utilisateurs
+                    SET nom=%s, telephone=%s, email=%s, role=%s, mot_de_passe=%s
+                    WHERE id=%s
+                """, (infos["nom"], infos["telephone"], infos["email"],
+                      infos["role"], mdp_hash, user_id))
+            else:
+                cursor.execute("""
+                    UPDATE utilisateurs
+                    SET nom=%s, telephone=%s, email=%s, role=%s
+                    WHERE id=%s
+                """, (infos["nom"], infos["telephone"], infos["email"],
+                      infos["role"], user_id))
+            conn.commit()
+            cursor.close()
         return True
-
-    finally:
-        cursor.close()
-        conn.close()
+    except Exception as e:
+        logging.error(f"Erreur modifier_utilisateur : {e}")
+        return False
 
 
 # =========================================================
 # 🌐 COMPTES CGAWEB
 # =========================================================
 def charger_comptes():
-    conn = get_connection()
-    if not conn:
-        return []
-
-    cursor = conn.cursor(dictionary=True)
-
     try:
-        cursor.execute("SELECT * FROM comptes_cgaweb")
-        comptes = cursor.fetchall()
-
+        with get_connection() as conn:
+            cursor = conn.cursor(dictionary=True)
+            cursor.execute("SELECT * FROM comptes_cgaweb")
+            comptes = cursor.fetchall()
+            cursor.close()
         for c in comptes:
             for champ in ("password_cga", "secret_otp"):
                 try:
                     if _est_chiffre(c[champ]):
                         c[champ] = dechiffrer(c[champ])
-                except:
+                except Exception:
                     pass
-
         return comptes
-
-    finally:
-        cursor.close()
-        conn.close()
+    except Exception as e:
+        logging.error(f"Erreur charger_comptes : {e}")
+        return []
 
 
 def enregistrer_nouveau_compte(user, password, secret):
-    conn = get_connection()
-    if not conn:
-        return False
-
-    cursor = conn.cursor()
-
     try:
-        cursor.execute("""
-            INSERT INTO comptes_cgaweb (user_cga, password_cga, secret_otp)
-            VALUES (%s, %s, %s)
-        """, (user, chiffrer(password), chiffrer(secret)))
-
-        conn.commit()
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO comptes_cgaweb (user_cga, password_cga, secret_otp)
+                VALUES (%s, %s, %s)
+            """, (user, chiffrer(password), chiffrer(secret)))
+            conn.commit()
+            cursor.close()
         return True
-
-    finally:
-        cursor.close()
-        conn.close()
+    except Exception as e:
+        logging.error(f"Erreur enregistrer_nouveau_compte : {e}")
+        return False
 
 
 def obtenir_compte_actif_worker():
-    conn = get_connection()
-    if not conn:
-        return None
-
-    cursor = conn.cursor(dictionary=True)
-
     try:
-        cursor.execute("SELECT * FROM comptes_cgaweb WHERE est_actif=TRUE LIMIT 1")
-        compte = cursor.fetchone()
-
+        with get_connection() as conn:
+            cursor = conn.cursor(dictionary=True)
+            cursor.execute("SELECT * FROM comptes_cgaweb WHERE est_actif=TRUE LIMIT 1")
+            compte = cursor.fetchone()
+            cursor.close()
         if compte:
             if _est_chiffre(compte["password_cga"]):
                 compte["password_cga"] = dechiffrer(compte["password_cga"])
             if _est_chiffre(compte["secret_otp"]):
                 compte["secret_otp"] = dechiffrer(compte["secret_otp"])
-
         return compte
-
-    finally:
-        cursor.close()
-        conn.close()
+    except Exception as e:
+        logging.error(f"Erreur obtenir_compte_actif_worker : {e}")
+        return None
 
 
 def marquer_compte_actif(compte_id):
-    conn = get_connection()
-    if not conn:
-        return
-
-    cursor = conn.cursor()
-
     try:
-        cursor.execute("UPDATE comptes_cgaweb SET est_actif=FALSE")
-        cursor.execute("UPDATE comptes_cgaweb SET est_actif=TRUE WHERE id=%s", (compte_id,))
-        conn.commit()
-
-    finally:
-        cursor.close()
-        conn.close()
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("UPDATE comptes_cgaweb SET est_actif=FALSE")
+            cursor.execute("UPDATE comptes_cgaweb SET est_actif=TRUE WHERE id=%s", (compte_id,))
+            conn.commit()
+            cursor.close()
+    except Exception as e:
+        logging.error(f"Erreur marquer_compte_actif : {e}")
 
 
 def supprimer_compte_sql(compte_id):
-    conn = get_connection()
-    if not conn:
-        return
-
-    cursor = conn.cursor()
-
     try:
-        cursor.execute("DELETE FROM comptes_cgaweb WHERE id=%s", (compte_id,))
-        conn.commit()
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM comptes_cgaweb WHERE id=%s", (compte_id,))
+            conn.commit()
+            cursor.close()
+    except Exception as e:
+        logging.error(f"Erreur supprimer_compte_sql : {e}")
 
-    finally:
-        cursor.close()
-        conn.close()
 
+# =========================================================
+# 🔧 SESSION
+# =========================================================
+def est_connecte():
+    return (
+        "utilisateur_connecte" in st.session_state
+        and st.session_state["utilisateur_connecte"] is not None
+    )
 
 # =========================================================
 # 🔧 SESSION
